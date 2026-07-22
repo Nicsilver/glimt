@@ -87,7 +87,7 @@ pub struct OverlayState {
     color: Color32,
     drag: Option<DragOp>,
     text_draft: Option<TextDraft>,
-    focused_once: bool,
+    frames: u32,
 }
 
 impl OverlayState {
@@ -115,7 +115,7 @@ impl OverlayState {
             color: COLORS[0],
             drag: None,
             text_draft: None,
-            focused_once: false,
+            frames: 0,
         }
     }
 
@@ -127,9 +127,15 @@ impl OverlayState {
     }
 
     /// Declare one fullscreen viewport per monitor; returns Some when the overlay should close.
+    ///
+    /// The windows stay hidden for the first two frames (create + geometry-correct),
+    /// then get revealed with content already painted. Showing them right away means
+    /// DWM composites an uninitialized white surface with its window-open fade, which
+    /// reads as a flash animation instead of an instant freeze.
     pub fn show_all(&mut self, ctx: &Context) -> Option<Outcome> {
         let mut outcome = None;
         let fallback_scale = ctx.pixels_per_point();
+        let visible = self.frames >= 2;
         for i in 0..self.shots.len() {
             let scale = self.scales[i].unwrap_or(fallback_scale);
             let (x, y, w, h) = self.shots[i].rect;
@@ -140,7 +146,8 @@ impl OverlayState {
                 .with_decorations(false)
                 .with_resizable(false)
                 .with_always_on_top()
-                .with_taskbar(false);
+                .with_taskbar(false)
+                .with_visible(visible);
             ctx.show_viewport_immediate(
                 ViewportId::from_hash_of(("glimt-overlay", i)),
                 builder,
@@ -151,13 +158,20 @@ impl OverlayState {
                 },
             );
         }
-        if !self.focused_once {
-            // Grab keyboard focus so Esc works before any click.
-            ctx.send_viewport_cmd_to(
+        self.frames += 1;
+        match self.frames {
+            // Windows now exist but are still hidden: the transition-disable lands
+            // before their first composition, killing the DWM open fade.
+            1 => disable_open_animations(),
+            // First visible frame: grab keyboard focus so Esc works before any click.
+            3 => ctx.send_viewport_cmd_to(
                 ViewportId::from_hash_of(("glimt-overlay", 0usize)),
                 ViewportCommand::Focus,
-            );
-            self.focused_once = true;
+            ),
+            _ => {}
+        }
+        if self.frames <= 3 {
+            ctx.request_repaint();
         }
         outcome
     }
@@ -802,6 +816,35 @@ fn clamp_rect(r: Rect, bounds: Vec2) -> Rect {
         r = r.translate(vec2(0.0, bounds.y - r.max.y));
     }
     r
+}
+
+/// Disable DWM window transitions on every top-level window of this process so the
+/// overlay viewports appear without the system's window-open fade.
+fn disable_open_animations() {
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::Graphics::Dwm::{DWMWA_TRANSITIONS_FORCEDISABLED, DwmSetWindowAttribute};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId};
+
+    unsafe extern "system" fn cb(hwnd: HWND, _: LPARAM) -> windows::core::BOOL {
+        unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == GetCurrentProcessId() {
+                let disable: i32 = 1;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_TRANSITIONS_FORCEDISABLED,
+                    &disable as *const i32 as *const _,
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
+        }
+        true.into()
+    }
+    unsafe {
+        let _ = EnumWindows(Some(cb), LPARAM(0));
+    }
 }
 
 /// Filled triangle head sized ~4x stroke width, split into the polygons egui needs.
