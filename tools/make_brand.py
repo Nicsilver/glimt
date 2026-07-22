@@ -31,15 +31,26 @@ def astroid(cx, cy, r, n=240):
     return pts
 
 
-def brackets(d, size, inset, arm, thick, color):
-    """Viewfinder corner brackets, rounded ends."""
+def bracket_corner(d, cx, cy, dx, dy, arm, thick, color):
+    """One L bracket with its outer corner exactly at (cx, cy), arms running dx/dy inward.
+
+    Both arm rects start at the corner so their roundings overlap into one clean
+    rounded outer corner; offsetting them leaves a notch at the tip.
+    """
     r = thick / 2
+    x0, x1 = sorted([cx, cx + dx * arm])
+    y0, y1 = sorted([cy, cy + dy * thick])
+    d.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=color)
+    x0, x1 = sorted([cx, cx + dx * thick])
+    y0, y1 = sorted([cy, cy + dy * arm])
+    d.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=color)
+
+
+def brackets(d, size, inset, arm, thick, color):
+    """Viewfinder corner brackets framing a square canvas."""
     lo, hi = inset, size - inset
     for cx, cy, dx, dy in [(lo, lo, 1, 1), (hi, lo, -1, 1), (lo, hi, 1, -1), (hi, hi, -1, -1)]:
-        x0, x1 = sorted([cx, cx + dx * arm])
-        d.rounded_rectangle([x0, cy - r, x1, cy + r], radius=r, fill=color)
-        y0, y1 = sorted([cy, cy + dy * arm])
-        d.rounded_rectangle([cx - r, y0, cx + r, y1], radius=r, fill=color)
+        bracket_corner(d, cx, cy, dx, dy, arm, thick, color)
 
 
 def mark(size=MASTER, with_brackets=True):
@@ -73,21 +84,15 @@ def make_banner():
     img = Image.new("RGBA", (w, h), INK)
     d = ImageDraw.Draw(img)
 
-    # the banner is itself a Glimt selection: corner brackets + the overlay's size badge
-    # (brackets drawn manually since brackets() frames a square, not a 2:1 canvas)
+    # the banner is itself a Glimt selection, framed by faint corner brackets
     dim_slate = (139, 147, 167, 110)
-    r = 3.5
     inset, arm = 36, 52
     for cx, cy, dx, dy in [(inset, inset, 1, 1), (w - inset, inset, -1, 1),
                            (inset, h - inset, 1, -1), (w - inset, h - inset, -1, -1)]:
-        x0, x1 = sorted([cx, cx + dx * arm])
-        d.rounded_rectangle([x0, cy - r, x1, cy + r], radius=r, fill=dim_slate)
-        y0, y1 = sorted([cy, cy + dy * arm])
-        d.rounded_rectangle([cx - r, y0, cx + r, y1], radius=r, fill=dim_slate)
+        bracket_corner(d, cx, cy, dx, dy, arm, 7, dim_slate)
 
     font_big = ImageFont.truetype("assets/Inter-Medium.ttf", 148)
     font_small = ImageFont.truetype("assets/Inter-Medium.ttf", 34)
-    font_badge = ImageFont.truetype("assets/Inter-Medium.ttf", 22)
 
     tile = mark().resize((240, 240), Image.LANCZOS)
     name = "Glimt"
@@ -103,13 +108,6 @@ def make_banner():
     tx = x0 + 240 + gap
     d.text((tx, h / 2 - 118), name, font=font_big, fill=PAPER)
     d.text((tx + 6, h / 2 + 44), tagline, font=font_small, fill=SLATE)
-
-    # size badge, bottom right, like the overlay's live selection badge
-    badge = "1280 × 640"
-    bw = d.textlength(badge, font=font_badge)
-    bx, by = w - inset - bw - 40, h - inset - 46
-    d.rounded_rectangle([bx, by, bx + bw + 24, by + 34], radius=8, fill=(39, 43, 56, 255))
-    d.text((bx + 12, by + 5), badge, font=font_badge, fill=SLATE)
 
     os.makedirs("screenshots", exist_ok=True)
     img.convert("RGB").save("screenshots/social-banner.png")
