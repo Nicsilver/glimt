@@ -3,6 +3,7 @@
 Outputs:
   assets/glimt.ico          multi-size app icon (brackets dropped below 32 px)
   assets/tray.png           32 px tray icon
+  assets/tray-rec.png       32 px tray icon with recording dot
   screenshots/social-banner.png  1280x640 GitHub social preview / README banner
 
 Run from the repo root: python tools/make_brand.py
@@ -16,6 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 INK = (27, 30, 40, 255)  # #1B1E28
 AMBER = (255, 197, 61, 255)  # #FFC53D
+RED = (229, 72, 77, 255)  # #E5484D
 SLATE = (139, 147, 167, 255)  # #8B93A7
 PAPER = (242, 244, 248, 255)  # #F2F4F8
 
@@ -77,6 +79,13 @@ def make_ico():
 
 def make_tray():
     mark().resize((32, 32), Image.LANCZOS).save("assets/tray.png")
+    # recording variant: red dot over the glint, centered in the lower-right quadrant
+    rec = mark()
+    d = ImageDraw.Draw(rec)
+    cx = cy = MASTER * 0.75
+    r = MASTER * 0.28
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=RED)
+    rec.resize((32, 32), Image.LANCZOS).save("assets/tray-rec.png")
 
 
 def make_banner():
@@ -118,7 +127,7 @@ def main():
     make_ico()
     make_tray()
     make_banner()
-    print("Wrote assets/glimt.ico, assets/tray.png, screenshots/social-banner.png")
+    print("Wrote assets/glimt.ico, assets/tray.png, assets/tray-rec.png, screenshots/social-banner.png")
 
 
 if __name__ == "__main__":

@@ -1,20 +1,22 @@
 use anyhow::{Context, Result};
 use global_hotkey::GlobalHotKeyManager;
-use global_hotkey::hotkey::{Code, HotKey};
+use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
 use windows::core::w;
 
 pub struct Hotkey {
-    // Kept alive for the process lifetime; dropping unregisters the hotkey.
+    // Kept alive for the process lifetime; dropping unregisters the hotkeys.
     pub _manager: GlobalHotKeyManager,
+    pub prtsc_id: u32,
+    pub shift_prtsc_id: u32,
 }
 
 pub fn register_prtsc() -> Result<Hotkey> {
     let manager = GlobalHotKeyManager::new().context("creating hotkey manager")?;
-    if manager
-        .register(HotKey::new(None, Code::PrintScreen))
-        .is_err()
-    {
+    let prtsc = HotKey::new(None, Code::PrintScreen);
+    let shift_prtsc = HotKey::new(Some(Modifiers::SHIFT), Code::PrintScreen);
+    let (prtsc_id, shift_prtsc_id) = (prtsc.id(), shift_prtsc.id());
+    if manager.register(prtsc).is_err() {
         // Not fatal: capture still works from the tray. Warn so the user knows why
         // PrtSc does nothing (another screenshot app owns the key).
         unsafe {
@@ -28,7 +30,14 @@ pub fn register_prtsc() -> Result<Hotkey> {
             );
         }
     }
-    Ok(Hotkey { _manager: manager })
+    // Shift+PrtSc failing alone is unlikely; stay silent (video mode still
+    // reachable via the overlay's Photo/Video switch).
+    let _ = manager.register(shift_prtsc);
+    Ok(Hotkey {
+        _manager: manager,
+        prtsc_id,
+        shift_prtsc_id,
+    })
 }
 
 /// Windows' own "PrtSc opens Snipping Tool" setting swallows the key before we see it.

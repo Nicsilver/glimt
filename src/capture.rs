@@ -5,6 +5,9 @@ use windows::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW,
     HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, GetCursorInfo, GetIconInfo, ICONINFO,
+};
 
 pub struct MonitorShot {
     /// x, y, w, h in physical virtual-screen px.
@@ -72,6 +75,96 @@ fn enumerate_monitors() -> Vec<RECT> {
         let _ = EnumDisplayMonitors(None, None, Some(cb), LPARAM(&mut rects as *mut _ as isize));
     }
     rects
+}
+
+/// BGRA rows BOTTOM-UP, w*h*4 bytes. `buf` is reused across frames.
+///
+/// Bottom-up (positive biHeight) is exactly what the MP4 encoder wants, so that
+/// path copies nothing; the GIF sink flips rows during its BGRA->RGBA pass.
+pub fn capture_region_bgra(x: i32, y: i32, w: u32, h: u32, buf: &mut Vec<u8>) -> Result<()> {
+    unsafe {
+        let screen_dc = GetDC(None);
+        if screen_dc.is_invalid() {
+            bail!("GetDC failed");
+        }
+        let mem_dc = CreateCompatibleDC(Some(screen_dc));
+        let bitmap = CreateCompatibleBitmap(screen_dc, w as i32, h as i32);
+        let old = SelectObject(mem_dc, bitmap.into());
+
+        let blit = BitBlt(
+            mem_dc,
+            0,
+            0,
+            w as i32,
+            h as i32,
+            Some(screen_dc),
+            x,
+            y,
+            SRCCOPY,
+        );
+
+        // Draw the mouse cursor into the frame; BitBlt alone never includes it.
+        let mut ci = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetCursorInfo(&mut ci).is_ok() && ci.flags == CURSOR_SHOWING {
+            let mut ii = ICONINFO::default();
+            if GetIconInfo(ci.hCursor.into(), &mut ii).is_ok() {
+                let _ = DrawIconEx(
+                    mem_dc,
+                    ci.ptScreenPos.x - x - ii.xHotspot as i32,
+                    ci.ptScreenPos.y - y - ii.yHotspot as i32,
+                    ci.hCursor.into(),
+                    0,
+                    0,
+                    0,
+                    None,
+                    DI_NORMAL,
+                );
+                // GetIconInfo hands out bitmap COPIES; not deleting them leaks 2 bitmaps/frame.
+                if !ii.hbmMask.is_invalid() {
+                    let _ = DeleteObject(ii.hbmMask.into());
+                }
+                if !ii.hbmColor.is_invalid() {
+                    let _ = DeleteObject(ii.hbmColor.into());
+                }
+            }
+        }
+
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w as i32,
+                biHeight: h as i32, // positive = bottom-up rows
+                biPlanes: 1,
+                biBitCount: 32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        buf.resize((w as usize) * (h as usize) * 4, 0);
+        let lines = GetDIBits(
+            mem_dc,
+            bitmap,
+            0,
+            h,
+            Some(buf.as_mut_ptr() as *mut _),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+
+        SelectObject(mem_dc, old);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(None, screen_dc);
+
+        blit.context("BitBlt failed")?;
+        if lines == 0 {
+            bail!("GetDIBits failed");
+        }
+        Ok(())
+    }
 }
 
 fn capture_monitor(rect: RECT) -> Result<MonitorShot> {

@@ -5,6 +5,7 @@ use egui::{
 };
 
 use crate::capture::MonitorShot;
+use crate::config::VideoFormat;
 
 pub const COLORS: [Color32; 5] = [
     Color32::from_rgb(229, 72, 77),  // red
@@ -13,6 +14,12 @@ pub const COLORS: [Color32; 5] = [
     Color32::from_rgb(62, 133, 240), // blue
     Color32::BLACK,
 ];
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Mode {
+    Photo,
+    Video,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tool {
@@ -74,6 +81,7 @@ pub enum Outcome {
     Cancel,
     Copy,
     Save,
+    Record,
 }
 
 fn overlay_id(i: usize) -> ViewportId {
@@ -102,6 +110,8 @@ struct Capture {
     drag: Option<DragOp>,
     text_draft: Option<TextDraft>,
     frames: u32,
+    mode: Mode,
+    format: VideoFormat,
 }
 
 impl Overlay {
@@ -120,7 +130,13 @@ impl Overlay {
         self.cap.is_some()
     }
 
-    pub fn start(&mut self, ctx: &Context, shots: Vec<MonitorShot>) {
+    pub fn start(
+        &mut self,
+        ctx: &Context,
+        shots: Vec<MonitorShot>,
+        mode: Mode,
+        format: VideoFormat,
+    ) {
         let rects: Vec<_> = shots.iter().map(|s| s.rect).collect();
         if rects != self.monitors {
             // Monitor layout changed since the windows were created; they get
@@ -164,6 +180,8 @@ impl Overlay {
             drag: None,
             text_draft: None,
             frames: 0,
+            mode,
+            format,
         });
         ctx.request_repaint();
     }
@@ -184,6 +202,35 @@ impl Overlay {
             return None;
         };
         Some((&cap.shots[mon].image, rect, &cap.annotations))
+    }
+
+    /// Selection in virtual-screen physical px + chosen format, for recording.
+    pub fn record_data(&self) -> Option<((i32, i32, u32, u32), VideoFormat)> {
+        let cap = self.cap.as_ref()?;
+        let mon = cap.active_monitor?;
+        let Selection::Placed { rect } = cap.sel else {
+            return None;
+        };
+        let (mx, my, _, _) = cap.shots[mon].rect;
+        let x = mx + rect.min.x.round() as i32;
+        let y = my + rect.min.y.round() as i32;
+        // H.264 4:2:0 needs even dimensions; applied to GIF too for one code path.
+        let w = ((rect.width().round() as u32) & !1).max(2);
+        let h = ((rect.height().round() as u32) & !1).max(2);
+        Some(((x, y, w, h), cap.format))
+    }
+
+    pub fn scale_of(&self, monitor: usize) -> f32 {
+        self.scales.get(monitor).copied().flatten().unwrap_or(1.0)
+    }
+
+    /// x, y, w, h in physical virtual-screen px.
+    pub fn monitor_rect(&self, monitor: usize) -> (i32, i32, i32, i32) {
+        self.monitors[monitor]
+    }
+
+    pub fn active_monitor(&self) -> Option<usize> {
+        self.cap.as_ref()?.active_monitor
     }
 
     /// Declare one fullscreen viewport per monitor; returns Some when the overlay
@@ -298,7 +345,8 @@ impl Overlay {
             }
 
             // Committed + in-progress annotations (only on the owning monitor).
-            if cap.active_monitor == Some(i) {
+            // Hidden in video mode but kept in state so switching back restores them.
+            if cap.active_monitor == Some(i) && cap.mode == Mode::Photo {
                 cap.paint_annotations(ui.painter(), ppp);
             }
 
@@ -323,7 +371,9 @@ impl Overlay {
                 && matches!(cap.sel, Selection::Placed { .. })
                 && let Some(s) = sel_pts
             {
-                cap.toolbar(ctx, s, ui.max_rect());
+                if let Some(o) = cap.toolbar(ctx, s, ui.max_rect()) {
+                    outcome = Some(o);
+                }
                 cap.text_editor(ctx, ppp);
             }
         }
@@ -376,7 +426,8 @@ impl Capture {
                 (Selection::Placed { rect }, Some(mon)) if mon == i => {
                     let rect = *rect;
                     let rect_pts = Rect::from_min_max(rect.min / ppp, rect.max / ppp);
-                    if self.tool == Tool::Select {
+                    // Video mode has no annotation tools; every drag acts on the selection.
+                    if self.mode == Mode::Video || self.tool == Tool::Select {
                         if let Some(h) = hit_handle(rect_pts, pointer_pts?) {
                             self.drag = Some(DragOp::Resize { handle: h });
                         } else if rect.contains(p) {
@@ -466,7 +517,7 @@ impl Capture {
         }
 
         // Text tool: click inside the selection opens a floating editor.
-        if resp.clicked() && self.tool == Tool::Text {
+        if resp.clicked() && self.tool == Tool::Text && self.mode == Mode::Photo {
             if let (Some(p), Selection::Placed { rect }) = (pointer_phys, &self.sel) {
                 if rect.contains(p) {
                     self.commit_text_draft();
@@ -527,11 +578,21 @@ impl Capture {
             return Some(Outcome::Cancel);
         }
         if matches!(self.sel, Selection::Placed { .. }) {
-            if copy {
-                return Some(Outcome::Copy);
-            }
-            if save {
-                return Some(Outcome::Save);
+            match self.mode {
+                Mode::Photo => {
+                    if copy {
+                        return Some(Outcome::Copy);
+                    }
+                    if save {
+                        return Some(Outcome::Save);
+                    }
+                }
+                // Copy/save are photo verbs; Enter starts the recording.
+                Mode::Video => {
+                    if enter {
+                        return Some(Outcome::Record);
+                    }
+                }
             }
         }
         if undo {
@@ -742,12 +803,13 @@ impl Capture {
         }
     }
 
-    fn toolbar(&mut self, ctx: &Context, sel_pts: Rect, screen: Rect) {
+    fn toolbar(&mut self, ctx: &Context, sel_pts: Rect, screen: Rect) -> Option<Outcome> {
         const BAR_H: f32 = 36.0;
         let mut pos = pos2(sel_pts.min.x, sel_pts.max.y + 10.0);
         if pos.y + BAR_H > screen.max.y {
             pos.y = sel_pts.min.y - 10.0 - BAR_H;
         }
+        let mut outcome = None;
         Area::new(Id::new("glimt-toolbar"))
             .fixed_pos(pos)
             .show(ctx, |ui| {
@@ -756,49 +818,75 @@ impl Capture {
                     .corner_radius(6.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            // Glyphs restricted to what egui's built-in fonts cover.
-                            let tools = [
-                                (Tool::Select, "\u{2196}"),
-                                (Tool::Pen, "\u{270F}"),
-                                (Tool::Line, "/"),
-                                (Tool::Arrow, "\u{27A1}"),
-                                (Tool::Rect, "\u{25FB}"),
-                                (Tool::Text, "T"),
-                            ];
-                            for (tool, label) in tools {
-                                if ui.selectable_label(self.tool == tool, label).clicked() {
+                            for (mode, label) in [(Mode::Photo, "Photo"), (Mode::Video, "Video")] {
+                                if ui.selectable_label(self.mode == mode, label).clicked() {
                                     self.commit_text_draft();
-                                    self.tool = tool;
+                                    self.mode = mode;
                                 }
                             }
                             ui.separator();
-                            for color in COLORS {
-                                let (rect, resp) =
-                                    ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
-                                let center = rect.center();
-                                ui.painter().circle_filled(center, 7.0, color);
-                                if self.color == color {
-                                    ui.painter().circle_stroke(
-                                        center,
-                                        8.5,
-                                        Stroke::new(1.5, Color32::WHITE),
-                                    );
+                            match self.mode {
+                                Mode::Photo => self.photo_tools(ui),
+                                Mode::Video => {
+                                    let formats =
+                                        [(VideoFormat::Mp4, "MP4"), (VideoFormat::Gif, "GIF")];
+                                    for (format, label) in formats {
+                                        if ui
+                                            .selectable_label(self.format == format, label)
+                                            .clicked()
+                                        {
+                                            self.format = format;
+                                        }
+                                    }
+                                    ui.separator();
+                                    if ui.button("Rec \u{25CF}").clicked() {
+                                        outcome = Some(Outcome::Record);
+                                    }
                                 }
-                                if resp.clicked() {
-                                    self.color = color;
-                                }
-                            }
-                            ui.separator();
-                            if ui
-                                .button("\u{21B6}")
-                                .on_hover_text("Undo (Ctrl+Z)")
-                                .clicked()
-                            {
-                                self.annotations.pop();
                             }
                         });
                     });
             });
+        outcome
+    }
+
+    fn photo_tools(&mut self, ui: &mut egui::Ui) {
+        // Glyphs restricted to what egui's built-in fonts cover.
+        let tools = [
+            (Tool::Select, "\u{2196}"),
+            (Tool::Pen, "\u{270F}"),
+            (Tool::Line, "/"),
+            (Tool::Arrow, "\u{27A1}"),
+            (Tool::Rect, "\u{25FB}"),
+            (Tool::Text, "T"),
+        ];
+        for (tool, label) in tools {
+            if ui.selectable_label(self.tool == tool, label).clicked() {
+                self.commit_text_draft();
+                self.tool = tool;
+            }
+        }
+        ui.separator();
+        for color in COLORS {
+            let (rect, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+            let center = rect.center();
+            ui.painter().circle_filled(center, 7.0, color);
+            if self.color == color {
+                ui.painter()
+                    .circle_stroke(center, 8.5, Stroke::new(1.5, Color32::WHITE));
+            }
+            if resp.clicked() {
+                self.color = color;
+            }
+        }
+        ui.separator();
+        if ui
+            .button("\u{21B6}")
+            .on_hover_text("Undo (Ctrl+Z)")
+            .clicked()
+        {
+            self.annotations.pop();
+        }
     }
 
     fn text_editor(&mut self, ctx: &Context, ppp: f32) {

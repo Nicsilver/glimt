@@ -171,8 +171,21 @@ pub fn to_clipboard(img: &image::RgbaImage) -> Result<()> {
         .context("clipboard set_image")
 }
 
+/// Put a file on the clipboard as a file drop (like Ctrl+C on it in Explorer).
+pub fn file_to_clipboard(path: &std::path::Path) -> Result<()> {
+    use clipboard_win::Setter;
+    let files = [path.to_string_lossy()];
+    // set_clipboard() can't take the unsized [T] the FileList Setter wants, so
+    // open the clipboard (with retries) and write through the trait directly.
+    let _clip = clipboard_win::Clipboard::new_attempts(10)
+        .map_err(|e| anyhow::anyhow!("opening clipboard: {e}"))?;
+    clipboard_win::formats::FileList
+        .write_clipboard(&files)
+        .map_err(|e| anyhow::anyhow!("clipboard file list: {e}"))
+}
+
 pub fn to_file(img: &image::RgbaImage) -> Result<std::path::PathBuf> {
-    let path = crate::config::save_dir()?.join(crate::config::filename_now());
+    let path = crate::config::save_dir()?.join(crate::config::filename_now("png"));
     img.save(&path).context("saving png")?;
     Ok(path)
 }

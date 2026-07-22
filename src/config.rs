@@ -3,11 +3,18 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum VideoFormat {
+    Mp4,
+    Gif,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub autostart: bool,
     pub prtsc_warning_shown: bool,
+    pub video_format: VideoFormat,
 }
 
 impl Default for Settings {
@@ -15,6 +22,7 @@ impl Default for Settings {
         Settings {
             autostart: true,
             prtsc_warning_shown: false,
+            video_format: VideoFormat::Mp4,
         }
     }
 }
@@ -47,9 +55,9 @@ pub fn save_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-pub fn filename_now() -> String {
+pub fn filename_now(ext: &str) -> String {
     format!(
-        "glimt_{}.png",
+        "glimt_{}.{ext}",
         chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
     )
 }
