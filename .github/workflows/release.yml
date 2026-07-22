@@ -1,0 +1,62 @@
+name: Release
+
+# Push a version tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`) to build the
+# portable exe and attach it to a GitHub Release (created if missing, assets clobbered
+# if re-run). `workflow_dispatch` builds without releasing.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cargo build (release)
+        run: cargo build --release
+      - name: Stage package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          cp target/release/glimt.exe stage/
+          cat > stage/INSTALL.txt <<'EOF'
+          Glimt
+
+          1. Put glimt.exe somewhere permanent (e.g. your home directory).
+          2. Run it. A lightning-bolt icon appears in the tray and Glimt starts
+             with Windows from now on (toggle that in the tray menu).
+          3. Press PrtSc, drag to select, Ctrl+C to copy or Ctrl+S to save.
+
+          Unsigned build: Windows SmartScreen will warn once.
+          EOF
+          cd stage
+          7z a "../Glimt-win-x64.zip" ./*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Glimt-win-x64
+          path: Glimt-win-x64.zip
+
+  release:
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
+            || gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
