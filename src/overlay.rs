@@ -76,13 +76,27 @@ pub enum Outcome {
     Save,
 }
 
-pub struct OverlayState {
-    pub shots: Vec<MonitorShot>,
-    textures: Vec<TextureHandle>,
+fn overlay_id(i: usize) -> ViewportId {
+    ViewportId::from_hash_of(("glimt-overlay", i))
+}
+
+/// Persistent overlay: one fullscreen viewport per monitor, created once at startup
+/// and kept alive (hidden) between captures. Window + swapchain creation is by far
+/// the slowest part of showing the overlay, so it must not sit on the PrtSc path.
+pub struct Overlay {
+    monitors: Vec<(i32, i32, i32, i32)>,
     scales: Vec<Option<f32>>,
+    animations_disabled: bool,
+    cap: Option<Capture>,
+}
+
+/// Everything belonging to one capture session; dropped when the overlay closes.
+struct Capture {
+    shots: Vec<MonitorShot>,
+    textures: Vec<TextureHandle>,
     sel: Selection,
-    pub active_monitor: Option<usize>,
-    pub annotations: Vec<Annotation>,
+    active_monitor: Option<usize>,
+    annotations: Vec<Annotation>,
     tool: Tool,
     color: Color32,
     drag: Option<DragOp>,
@@ -90,24 +104,58 @@ pub struct OverlayState {
     frames: u32,
 }
 
-impl OverlayState {
-    pub fn new(ctx: &Context, shots: Vec<MonitorShot>) -> Self {
-        let textures = shots
-            .iter()
+impl Overlay {
+    pub fn new() -> Self {
+        let monitors = crate::capture::monitor_rects();
+        let n = monitors.len();
+        Overlay {
+            monitors,
+            scales: vec![None; n],
+            animations_disabled: false,
+            cap: None,
+        }
+    }
+
+    pub fn active(&self) -> bool {
+        self.cap.is_some()
+    }
+
+    pub fn start(&mut self, ctx: &Context, shots: Vec<MonitorShot>) {
+        let rects: Vec<_> = shots.iter().map(|s| s.rect).collect();
+        if rects != self.monitors {
+            // Monitor layout changed since the windows were created; they get
+            // recreated/moved by the next frame's builders.
+            self.monitors = rects;
+            self.scales = vec![None; self.monitors.len()];
+            self.animations_disabled = false;
+        }
+        // The RGBA -> Color32 conversion is the biggest CPU cost after capture
+        // itself; convert all monitors in parallel.
+        let images: Vec<ColorImage> = std::thread::scope(|s| {
+            let handles: Vec<_> = shots
+                .iter()
+                .map(|shot| {
+                    s.spawn(move || {
+                        ColorImage::from_rgba_unmultiplied(
+                            [shot.image.width() as usize, shot.image.height() as usize],
+                            shot.image.as_raw(),
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("image conversion thread panicked"))
+                .collect()
+        });
+        let textures = images
+            .into_iter()
             .enumerate()
-            .map(|(i, shot)| {
-                let img = ColorImage::from_rgba_unmultiplied(
-                    [shot.image.width() as usize, shot.image.height() as usize],
-                    shot.image.as_raw(),
-                );
-                ctx.load_texture(format!("shot{i}"), img, TextureOptions::LINEAR)
-            })
+            .map(|(i, img)| ctx.load_texture(format!("shot{i}"), img, TextureOptions::LINEAR))
             .collect();
-        let n = shots.len();
-        OverlayState {
+        self.cap = Some(Capture {
             shots,
             textures,
-            scales: vec![None; n],
             sel: Selection::None,
             active_monitor: None,
             annotations: Vec::new(),
@@ -116,29 +164,43 @@ impl OverlayState {
             drag: None,
             text_draft: None,
             frames: 0,
-        }
+        });
+        ctx.request_repaint();
     }
 
-    pub fn selection_rect(&self) -> Option<Rect> {
-        match &self.sel {
-            Selection::Placed { rect } => Some(*rect),
-            _ => None,
+    /// Hide the overlay windows (kept alive for the next capture) and drop the session.
+    pub fn close(&mut self, ctx: &Context) {
+        for i in 0..self.monitors.len() {
+            ctx.send_viewport_cmd_to(overlay_id(i), ViewportCommand::Visible(false));
         }
+        self.cap = None;
+        ctx.request_repaint();
     }
 
-    /// Declare one fullscreen viewport per monitor; returns Some when the overlay should close.
+    pub fn export_data(&self) -> Option<(&image::RgbaImage, Rect, &[Annotation])> {
+        let cap = self.cap.as_ref()?;
+        let mon = cap.active_monitor?;
+        let Selection::Placed { rect } = cap.sel else {
+            return None;
+        };
+        Some((&cap.shots[mon].image, rect, &cap.annotations))
+    }
+
+    /// Declare one fullscreen viewport per monitor; returns Some when the overlay
+    /// should close.
     ///
-    /// The windows stay hidden for the first two frames (create + geometry-correct),
-    /// then get revealed with content already painted. Showing them right away means
-    /// DWM composites an uninitialized white surface with its window-open fade, which
-    /// reads as a flash animation instead of an instant freeze.
+    /// A fresh capture paints one frame while the windows are still hidden and is
+    /// revealed on the next. Showing before painting would composite stale or
+    /// uninitialized content, and DWM's window-open fade (disabled below) would
+    /// animate it — both read as a flash instead of an instant freeze.
     pub fn show_all(&mut self, ctx: &Context) -> Option<Outcome> {
         let mut outcome = None;
         let fallback_scale = ctx.pixels_per_point();
-        let visible = self.frames >= 2;
-        for i in 0..self.shots.len() {
+        let visible = self.cap.as_ref().is_some_and(|c| c.frames >= 1);
+        let n = self.monitors.len();
+        for i in 0..n {
             let scale = self.scales[i].unwrap_or(fallback_scale);
-            let (x, y, w, h) = self.shots[i].rect;
+            let (x, y, w, h) = self.monitors[i];
             let builder = ViewportBuilder::default()
                 .with_title("Glimt")
                 .with_position(pos2(x as f32 / scale, y as f32 / scale))
@@ -148,30 +210,27 @@ impl OverlayState {
                 .with_always_on_top()
                 .with_taskbar(false)
                 .with_visible(visible);
-            ctx.show_viewport_immediate(
-                ViewportId::from_hash_of(("glimt-overlay", i)),
-                builder,
-                |ui, _| {
-                    if let Some(o) = self.monitor_ui(ui, i) {
-                        outcome = Some(o);
-                    }
-                },
-            );
+            ctx.show_viewport_immediate(overlay_id(i), builder, |ui, _| {
+                if let Some(o) = self.monitor_ui(ui, i) {
+                    outcome = Some(o);
+                }
+            });
         }
-        self.frames += 1;
-        match self.frames {
-            // Windows now exist but are still hidden: the transition-disable lands
+        if !self.animations_disabled {
+            // The windows exist (hidden) once declared; the transition-disable lands
             // before their first composition, killing the DWM open fade.
-            1 => disable_open_animations(),
-            // First visible frame: grab keyboard focus so Esc works before any click.
-            3 => ctx.send_viewport_cmd_to(
-                ViewportId::from_hash_of(("glimt-overlay", 0usize)),
-                ViewportCommand::Focus,
-            ),
-            _ => {}
+            disable_open_animations();
+            self.animations_disabled = true;
         }
-        if self.frames <= 3 {
-            ctx.request_repaint();
+        if let Some(cap) = &mut self.cap {
+            cap.frames += 1;
+            if cap.frames == 2 {
+                // First visible frame: grab keyboard focus so Esc works before any click.
+                ctx.send_viewport_cmd_to(overlay_id(0), ViewportCommand::Focus);
+            }
+            if cap.frames <= 2 {
+                ctx.request_repaint();
+            }
         }
         outcome
     }
@@ -181,6 +240,7 @@ impl OverlayState {
         // Measure the real per-monitor scale so next frame's builder positions correctly.
         self.scales[i] = Some(ctx.pixels_per_point());
         let ppp = ctx.pixels_per_point();
+        let cap = self.cap.as_mut()?;
 
         let mut outcome = None;
         {
@@ -190,13 +250,13 @@ impl OverlayState {
 
             // Frozen screen content.
             painter.image(
-                self.textures[i].id(),
+                cap.textures[i].id(),
                 screen,
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
 
-            let sel_pts = self.current_sel_phys().and_then(|(mon, r)| {
+            let sel_pts = cap.current_sel_phys().and_then(|(mon, r)| {
                 (mon == i).then(|| Rect::from_min_max(r.min / ppp, r.max / ppp))
             });
 
@@ -238,42 +298,44 @@ impl OverlayState {
             }
 
             // Committed + in-progress annotations (only on the owning monitor).
-            if self.active_monitor == Some(i) {
-                self.paint_annotations(ui.painter(), ppp);
+            if cap.active_monitor == Some(i) {
+                cap.paint_annotations(ui.painter(), ppp);
             }
 
-            let locked_elsewhere = self.active_monitor.is_some() && self.active_monitor != Some(i);
+            let locked_elsewhere = cap.active_monitor.is_some() && cap.active_monitor != Some(i);
             if !locked_elsewhere {
-                outcome = self.interact(ui, ctx, i, ppp);
+                outcome = cap.interact(ui, ctx, i, ppp);
             }
 
             // Chrome drawn on top of everything.
-            if self.active_monitor == Some(i) {
+            if cap.active_monitor == Some(i) {
                 if let Some(s) = sel_pts {
-                    self.draw_badge(ui.painter(), s, screen, ppp);
-                    if matches!(self.sel, Selection::Placed { .. }) {
-                        self.draw_handles(ui.painter(), s);
+                    cap.draw_badge(ui.painter(), s, screen, ppp);
+                    if matches!(cap.sel, Selection::Placed { .. }) {
+                        cap.draw_handles(ui.painter(), s);
                     }
                 }
-                if let Selection::Dragging { cur, .. } = self.sel {
-                    self.draw_loupe(ui, i, cur, ppp);
+                if let Selection::Dragging { cur, .. } = cap.sel {
+                    cap.draw_loupe(ui, i, cur, ppp);
                 }
             }
-            if self.active_monitor == Some(i)
-                && matches!(self.sel, Selection::Placed { .. })
+            if cap.active_monitor == Some(i)
+                && matches!(cap.sel, Selection::Placed { .. })
                 && let Some(s) = sel_pts
             {
-                self.toolbar(ctx, s, ui.max_rect());
-                self.text_editor(ctx, ppp);
+                cap.toolbar(ctx, s, ui.max_rect());
+                cap.text_editor(ctx, ppp);
             }
         }
 
-        if let Some(o) = self.handle_keys(&ctx, i) {
+        if let Some(o) = cap.handle_keys(&ctx, i) {
             outcome = Some(o);
         }
         outcome
     }
+}
 
+impl Capture {
     fn current_sel_phys(&self) -> Option<(usize, Rect)> {
         let mon = self.active_monitor?;
         match &self.sel {

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use windows::Win32::Foundation::{LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
-    BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap, CreateCompatibleDC,
+    BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW,
     HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject,
 };
@@ -24,8 +24,26 @@ impl ScreenCapturer for GdiCapturer {
         if monitors.is_empty() {
             bail!("no monitors found");
         }
-        monitors.into_iter().map(capture_monitor).collect()
+        // Capture monitors concurrently; each thread owns its own DCs, which GDI allows.
+        std::thread::scope(|s| {
+            let handles: Vec<_> = monitors
+                .into_iter()
+                .map(|r| s.spawn(move || capture_monitor(r)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("capture thread panicked"))
+                .collect()
+        })
     }
+}
+
+/// Current monitor rects (x, y, w, h in physical virtual-screen px), without capturing.
+pub fn monitor_rects() -> Vec<(i32, i32, i32, i32)> {
+    enumerate_monitors()
+        .iter()
+        .map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top))
+        .collect()
 }
 
 fn enumerate_monitors() -> Vec<RECT> {
@@ -69,17 +87,9 @@ fn capture_monitor(rect: RECT) -> Result<MonitorShot> {
         let bitmap = CreateCompatibleBitmap(screen_dc, w, h);
         let old = SelectObject(mem_dc, bitmap.into());
 
-        let blit = BitBlt(
-            mem_dc,
-            0,
-            0,
-            w,
-            h,
-            Some(screen_dc),
-            x,
-            y,
-            SRCCOPY | CAPTUREBLT,
-        );
+        // No CAPTUREBLT: with DWM compositing the screen DC already includes layered
+        // windows, and the flag forces a slow sync (and cursor blink) per monitor.
+        let blit = BitBlt(mem_dc, 0, 0, w, h, Some(screen_dc), x, y, SRCCOPY);
 
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {

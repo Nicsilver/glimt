@@ -21,7 +21,7 @@ Glimt sits in your tray and waits for PrtSc. The instant you press it, the scree
 
 ## Install
 
-Grab `Glimt-win-x64.zip` from [Releases](https://github.com/Nicsilver/glimt/releases), unzip, run `glimt.exe`. That's it. The exe is unsigned, so SmartScreen will warn once.
+Grab `glimt.exe` from [Releases](https://github.com/Nicsilver/glimt/releases) and run it. That's it. The exe is unsigned, so SmartScreen will warn once.
 
 ## Shortcuts
 

@@ -18,28 +18,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Cargo build (release)
         run: cargo build --release
-      - name: Stage package
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p stage
-          cp target/release/glimt.exe stage/
-          cat > stage/INSTALL.txt <<'EOF'
-          Glimt
-
-          1. Put glimt.exe somewhere permanent (e.g. your home directory).
-          2. Run it. A lightning-bolt icon appears in the tray and Glimt starts
-             with Windows from now on (toggle that in the tray menu).
-          3. Press PrtSc, drag to select, Ctrl+C to copy or Ctrl+S to save.
-
-          Unsigned build: Windows SmartScreen will warn once.
-          EOF
-          cd stage
-          7z a "../Glimt-win-x64.zip" ./*
       - uses: actions/upload-artifact@v4
         with:
-          name: Glimt-win-x64
-          path: Glimt-win-x64.zip
+          name: glimt
+          path: target/release/glimt.exe
 
   release:
     needs: [build]
@@ -59,4 +41,4 @@ jobs:
           set -euo pipefail
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
             || gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
-          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          gh release upload "${GITHUB_REF_NAME}" dist/glimt.exe --clobber

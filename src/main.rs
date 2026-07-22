@@ -24,17 +24,15 @@ enum AppMsg {
     Quit,
 }
 
-enum Mode {
-    Hidden,
-    Overlay(overlay::OverlayState),
-}
-
 struct GlimtApp {
     rx: mpsc::Receiver<AppMsg>,
     tray: tray::Tray,
     _hotkey: hotkey::Hotkey,
     settings: config::Settings,
-    mode: Mode,
+    overlay: overlay::Overlay,
+    // Run a few frames at startup so the overlay windows get created and their
+    // per-monitor scales measured before the first capture.
+    warmup_frames: u8,
 }
 
 fn main() {
@@ -84,7 +82,8 @@ fn main() {
                 tray,
                 _hotkey: hk,
                 settings,
-                mode: Mode::Hidden,
+                overlay: overlay::Overlay::new(),
+                warmup_frames: 0,
             }))
         }),
     );
@@ -163,14 +162,17 @@ impl eframe::App for GlimtApp {
             let _ = slot.set(ctx.clone());
         }
 
+        if self.warmup_frames < 3 {
+            self.warmup_frames += 1;
+            ctx.request_repaint();
+        }
+
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMsg::Capture => {
-                    if matches!(self.mode, Mode::Hidden) {
+                    if !self.overlay.active() {
                         match capture::GdiCapturer.capture_all() {
-                            Ok(shots) => {
-                                self.mode = Mode::Overlay(overlay::OverlayState::new(ctx, shots));
-                            }
+                            Ok(shots) => self.overlay.start(ctx, shots),
                             Err(e) => message_box(&format!("Capture failed: {e:#}")),
                         }
                     }
@@ -199,35 +201,29 @@ impl eframe::App for GlimtApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if let Mode::Overlay(state) = &mut self.mode
-            && let Some(outcome) = state.show_all(&ctx)
-        {
-            self.finish_overlay(outcome);
+        if let Some(outcome) = self.overlay.show_all(&ctx) {
+            self.finish_overlay(&ctx, outcome);
         }
     }
 }
 
 impl GlimtApp {
-    fn finish_overlay(&mut self, outcome: overlay::Outcome) {
-        let Mode::Overlay(state) = std::mem::replace(&mut self.mode, Mode::Hidden) else {
-            return;
-        };
-        let export = |state: &overlay::OverlayState| -> anyhow::Result<image::RgbaImage> {
-            let mon = state
-                .active_monitor
+    fn finish_overlay(&mut self, ctx: &egui::Context, outcome: overlay::Outcome) {
+        let export = || -> anyhow::Result<image::RgbaImage> {
+            let (shot, sel, annotations) = self
+                .overlay
+                .export_data()
                 .ok_or_else(|| anyhow::anyhow!("no selection"))?;
-            let sel = state
-                .selection_rect()
-                .ok_or_else(|| anyhow::anyhow!("no selection"))?;
-            export::render(&state.shots[mon].image, sel, &state.annotations)
+            export::render(shot, sel, annotations)
         };
         let result = match outcome {
             overlay::Outcome::Cancel => Ok(()),
-            overlay::Outcome::Copy => export(&state).and_then(|img| export::to_clipboard(&img)),
-            overlay::Outcome::Save => export(&state).map(|img| {
+            overlay::Outcome::Copy => export().and_then(|img| export::to_clipboard(&img)),
+            overlay::Outcome::Save => export().map(|img| {
                 let _ = export::to_file(&img);
             }),
         };
+        self.overlay.close(ctx);
         if let Err(e) = result {
             message_box(&format!("Export failed: {e:#}"));
         }
