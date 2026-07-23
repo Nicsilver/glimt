@@ -34,9 +34,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::w;
 
-/// Alpha of the black dim strips over the live screen (0-255). Kept light:
-/// just enough to read as "picker active" without hiding what you're framing.
-const DIM_ALPHA: u8 = 70;
+/// Alpha of the black dim strips over the live screen (0-255). Very light
+/// (~15%): just enough to read as "picker active" without hiding the screen.
+const DIM_ALPHA: u8 = 38;
 const BORDER: i32 = 2; // border strip thickness, physical px
 const AMBER: u32 = 0x003DC5FF; // COLORREF is 0x00BBGGRR: rgb(255, 197, 61)
 

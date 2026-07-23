@@ -270,8 +270,8 @@ impl Overlay {
             });
 
             // Dim everything but the selection (4 rects punch out the hole).
-            // Light: enough to signal "capture active" without hiding the screen.
-            let dim = Color32::from_black_alpha(70);
+            // Very light (~15%): just enough to signal "capture active".
+            let dim = Color32::from_black_alpha(38);
             match sel_pts {
                 Some(s) => {
                     let s = s.intersect(screen);
