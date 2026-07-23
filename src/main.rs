@@ -9,6 +9,7 @@ mod export;
 mod hotkey;
 mod overlay;
 mod picker;
+mod pill;
 mod record;
 mod single_instance;
 mod tray;
@@ -28,12 +29,19 @@ enum AppMsg {
     Quit,
 }
 
+// Pill button ids, shared across both pill states.
+const ID_MP4: u32 = 1;
+const ID_GIF: u32 = 2;
+const ID_REC: u32 = 3;
+const ID_CANCEL: u32 = 4;
+const ID_STOP: u32 = 5;
+const ID_DISCARD: u32 = 6;
+
 struct Recording {
     handle: record::RecorderHandle,
     started: std::time::Instant,
     region: (i32, i32, u32, u32),
     monitor: usize,
-    affinity_set: bool,
     border_affinity_set: bool,
 }
 
@@ -44,7 +52,9 @@ struct GlimtApp {
     settings: config::Settings,
     overlay: overlay::Overlay,
     picker: Option<picker::Picker>,
+    pick_pill: Option<pill::Pill>,
     recording: Option<Recording>,
+    rec_pill: Option<pill::Pill>,
     // Run a few frames at startup so the overlay windows get created and their
     // per-monitor scales measured before the first capture.
     warmup_frames: u8,
@@ -103,7 +113,9 @@ fn main() {
                 settings,
                 overlay: overlay::Overlay::new(),
                 picker: None,
+                pick_pill: None,
                 recording: None,
+                rec_pill: None,
                 warmup_frames: 0,
             }))
         }),
@@ -275,7 +287,7 @@ impl eframe::App for GlimtApp {
         if let Some(outcome) = self.overlay.show_all(&ctx) {
             self.finish_overlay(&ctx, outcome);
         }
-        self.picker_pill(&ctx);
+        self.picker_pill();
         self.recording_pill(&ctx);
         self.record_border(&ctx);
     }
@@ -309,8 +321,9 @@ impl GlimtApp {
             return;
         };
         self.picker = None;
-        // The dim/border windows must be off screen before the first frame is
-        // captured, and DestroyWindow only takes effect at the next composition.
+        self.pick_pill = None;
+        // The dim/border/pill windows must be off screen before the first frame
+        // is captured, and DestroyWindow only takes effect at the next composition.
         dwm_flush();
         let format = self.settings.video_format;
         self.recording = Some(Recording {
@@ -318,102 +331,72 @@ impl GlimtApp {
             started: std::time::Instant::now(),
             region,
             monitor,
-            affinity_set: false,
             border_affinity_set: false,
         });
         self.tray.set_recording(true);
     }
 
     /// Pre-record control pill under the picked region: size, MP4/GIF, Rec, cancel.
-    fn picker_pill(&mut self, ctx: &egui::Context) {
-        const PILL_SIZE: egui::Vec2 = egui::vec2(280.0, 44.0);
+    fn picker_pill(&mut self) {
         let Some((region, monitor)) = self.picker.as_ref().and_then(|p| p.placed()) else {
+            self.pick_pill = None;
             return;
         };
         let scale = self.overlay.scale_of(monitor);
-        let (_, mon_y, _, mon_h) = self.overlay.monitor_rect(monitor);
         let (rx, ry, rw, rh) = region;
-
-        // Physical px -> points; flip above the region if it would land off
-        // the monitor's bottom (same logic as the recording pill).
-        let pill_h_phys = (PILL_SIZE.y * scale) as i32;
-        let mut y_phys = ry + rh as i32 + 8;
-        if y_phys + pill_h_phys > mon_y + mon_h {
-            y_phys = ry - 8 - pill_h_phys;
-        }
-        let pos = egui::pos2(rx as f32 / scale, y_phys as f32 / scale);
-
-        let (mut start, mut cancel) = (false, false);
-        let settings = &mut self.settings;
-        let builder = ViewportBuilder::default()
-            .with_title("Glimt Record")
-            .with_position(pos)
-            .with_inner_size(PILL_SIZE)
-            .with_decorations(false)
-            .with_always_on_top()
-            .with_taskbar(false)
-            .with_resizable(false);
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("glimt-pickbar"),
-            builder,
-            |ui, _| {
-                ui.painter()
-                    .rect_filled(ui.max_rect(), 6.0, egui::Color32::from_rgb(27, 30, 40));
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(10.0);
-                    ui.label(
-                        egui::RichText::new(format!("{rw}\u{00D7}{rh}"))
-                            .color(egui::Color32::GRAY)
-                            .size(12.0),
-                    );
-                    ui.separator();
-                    let formats = [
-                        (config::VideoFormat::Mp4, "MP4"),
-                        (config::VideoFormat::Gif, "GIF"),
-                    ];
-                    for (format, label) in formats {
-                        if ui
-                            .selectable_label(settings.video_format == format, label)
-                            .clicked()
-                        {
-                            settings.video_format = format;
-                            settings.save();
-                        }
-                    }
-                    ui.separator();
-                    // "●"/"✕" glyphs are tofu in egui's fonts; paint the red
-                    // dot and use plain text instead.
-                    let (dot, _) =
-                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                    ui.painter().circle_filled(
-                        dot.center(),
-                        5.0,
-                        egui::Color32::from_rgb(229, 72, 77),
-                    );
-                    if ui.button("Rec").clicked() {
-                        start = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-                // The picker's input window normally holds focus, but after a
-                // click on the pill these land here instead.
-                ui.input(|i| {
-                    if i.key_pressed(egui::Key::Escape) {
-                        cancel = true;
-                    }
-                    if i.key_pressed(egui::Key::Enter) {
-                        start = true;
-                    }
-                });
+        let items = [
+            pill::Item::Label(format!("{rw}\u{00D7}{rh}")),
+            pill::Item::Sep,
+            pill::Item::Button {
+                id: ID_MP4,
+                text: "MP4".into(),
+                selected: self.settings.video_format == config::VideoFormat::Mp4,
             },
-        );
+            pill::Item::Button {
+                id: ID_GIF,
+                text: "GIF".into(),
+                selected: self.settings.video_format == config::VideoFormat::Gif,
+            },
+            pill::Item::Sep,
+            pill::Item::Dot,
+            pill::Item::Button {
+                id: ID_REC,
+                text: "Rec".into(),
+                selected: false,
+            },
+            pill::Item::Button {
+                id: ID_CANCEL,
+                text: "Cancel".into(),
+                selected: false,
+            },
+        ];
 
-        if cancel {
-            self.picker = None;
-        } else if start {
-            self.start_picker_recording();
+        if self.pick_pill.is_none() {
+            // Never activatable: the picker's input window keeps the keyboard,
+            // so Enter/Esc work even right after clicking the pill.
+            self.pick_pill = pill::Pill::open(scale, false, None).ok();
+        }
+        let Some(p) = &self.pick_pill else { return };
+        let (_, ph) = pill::Pill::measure(&items, scale);
+        let (x, y) = pill_pos(self.overlay.monitor_rect(monitor), (rx, ry, rh), ph);
+        p.set(x, y, &items);
+
+        match p.take_click() {
+            Some(ID_MP4) => self.set_format(config::VideoFormat::Mp4),
+            Some(ID_GIF) => self.set_format(config::VideoFormat::Gif),
+            Some(ID_REC) => self.start_picker_recording(),
+            Some(ID_CANCEL) => {
+                self.picker = None;
+                self.pick_pill = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn set_format(&mut self, format: config::VideoFormat) {
+        if self.settings.video_format != format {
+            self.settings.video_format = format;
+            self.settings.save();
         }
     }
 
@@ -441,75 +424,47 @@ impl GlimtApp {
     /// Floating always-on-top control pill next to the recorded region: timer,
     /// Stop, Discard. Excluded from capture so it never shows in the recording.
     fn recording_pill(&mut self, ctx: &egui::Context) {
-        const PILL_SIZE: egui::Vec2 = egui::vec2(190.0, 44.0);
         let Some(rec) = &self.recording else {
+            self.rec_pill = None;
             return;
         };
         let scale = self.overlay.scale_of(rec.monitor);
-        let (_, mon_y, _, mon_h) = self.overlay.monitor_rect(rec.monitor);
         let (rx, ry, _rw, rh) = rec.region;
-        let started = rec.started;
-
-        // Physical px -> points; flip above the region if the pill would land
-        // off the monitor's bottom (mirrors the toolbar's flip logic).
-        let pill_h_phys = (PILL_SIZE.y * scale) as i32;
-        let mut y_phys = ry + rh as i32 + 8;
-        if y_phys + pill_h_phys > mon_y + mon_h {
-            y_phys = ry - 8 - pill_h_phys;
-        }
-        let pos = egui::pos2(rx as f32 / scale, y_phys as f32 / scale);
-
-        let (mut stop, mut discard) = (false, false);
-        let builder = ViewportBuilder::default()
-            .with_title("Glimt Recording")
-            .with_position(pos)
-            .with_inner_size(PILL_SIZE)
-            .with_decorations(false)
-            .with_always_on_top()
-            .with_taskbar(false)
-            .with_resizable(false);
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("glimt-recbar"),
-            builder,
-            |ui, _| {
-                ui.painter()
-                    .rect_filled(ui.max_rect(), 6.0, egui::Color32::from_rgb(27, 30, 40));
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(10.0);
-                    let (dot, _) =
-                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    ui.painter().circle_filled(
-                        dot.center(),
-                        5.0,
-                        egui::Color32::from_rgb(229, 72, 77),
-                    );
-                    let secs = started.elapsed().as_secs();
-                    ui.label(
-                        egui::RichText::new(format!("{}:{:02}", secs / 60, secs % 60))
-                            .color(egui::Color32::WHITE),
-                    );
-                    if ui.button("Stop").clicked() {
-                        stop = true;
-                    }
-                    if ui.button("Discard").clicked() {
-                        discard = true;
-                    }
-                });
-                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    discard = true;
-                }
+        let secs = rec.started.elapsed().as_secs();
+        let items = [
+            pill::Item::Dot,
+            pill::Item::Label(format!("{}:{:02}", secs / 60, secs % 60)),
+            pill::Item::Button {
+                id: ID_STOP,
+                text: "Stop".into(),
+                selected: false,
             },
-        );
+            pill::Item::Button {
+                id: ID_DISCARD,
+                text: "Discard".into(),
+                selected: false,
+            },
+        ];
 
-        let rec = self.recording.as_mut().expect("recording checked above");
-        if stop {
-            rec.handle.stop();
+        if self.rec_pill.is_none() {
+            // Activatable so Esc = discard works after a click; created without
+            // stealing focus from whatever is being recorded.
+            let p = pill::Pill::open(scale, true, Some(ID_DISCARD)).ok();
+            if let Some(p) = &p {
+                p.exclude_from_capture();
+            }
+            self.rec_pill = p;
         }
-        if discard {
-            rec.handle.discard();
-        }
-        if !rec.affinity_set && exclude_from_capture("Glimt Recording") {
-            rec.affinity_set = true;
+        let monitor_rect = self.overlay.monitor_rect(rec.monitor);
+        if let Some(p) = &self.rec_pill {
+            let (_, ph) = pill::Pill::measure(&items, scale);
+            let (x, y) = pill_pos(monitor_rect, (rx, ry, rh), ph);
+            p.set(x, y, &items);
+            match p.take_click() {
+                Some(ID_STOP) => rec.handle.stop(),
+                Some(ID_DISCARD) => rec.handle.discard(),
+                _ => {}
+            }
         }
         // Keep the timer ticking (and the recorder channel polled).
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
@@ -568,19 +523,17 @@ impl GlimtApp {
     }
 }
 
-/// Exclude this process's window with the given title from screen capture, so
-/// the control pill never appears in the recording even when it overlaps it.
-fn exclude_from_capture(title: &str) -> bool {
+/// Find this process's top-level window with the given title.
+fn find_own_window(title: &str) -> Option<windows::Win32::Foundation::HWND> {
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, SetWindowDisplayAffinity,
-        WDA_EXCLUDEFROMCAPTURE,
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId,
     };
 
     struct Data {
         title: Vec<u16>,
-        done: bool,
+        found: Option<HWND>,
     }
     unsafe extern "system" fn cb(hwnd: HWND, data: LPARAM) -> windows::core::BOOL {
         unsafe {
@@ -591,7 +544,7 @@ fn exclude_from_capture(title: &str) -> bool {
                 let mut buf = [0u16; 64];
                 let len = GetWindowTextW(hwnd, &mut buf) as usize;
                 if buf[..len] == data.title[..] {
-                    data.done = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok();
+                    data.found = Some(hwnd);
                     return false.into(); // found it; stop enumerating
                 }
             }
@@ -600,13 +553,40 @@ fn exclude_from_capture(title: &str) -> bool {
     }
     let mut data = Data {
         title: title.encode_utf16().collect(),
-        done: false,
+        found: None,
     };
     unsafe {
         // Returns Err when the callback stops enumeration early; not a failure.
         let _ = EnumWindows(Some(cb), LPARAM(&mut data as *mut _ as isize));
     }
-    data.done
+    data.found
+}
+
+/// Exclude this process's window with the given title from screen capture, so
+/// the control pill never appears in the recording even when it overlaps it.
+fn exclude_from_capture(title: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+    };
+    match find_own_window(title) {
+        Some(hwnd) => unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok() },
+        None => false,
+    }
+}
+
+/// Pill position under a region (physical px): left-aligned, flipped above the
+/// region when it would land off the monitor's bottom.
+fn pill_pos(
+    monitor: (i32, i32, i32, i32),
+    (rx, ry, rh): (i32, i32, u32),
+    pill_h: i32,
+) -> (i32, i32) {
+    let (_, mon_y, _, mon_h) = monitor;
+    let mut y = ry + rh as i32 + 8;
+    if y + pill_h > mon_y + mon_h {
+        y = ry - 8 - pill_h;
+    }
+    (rx, y)
 }
 
 fn message_box(text: &str) {
