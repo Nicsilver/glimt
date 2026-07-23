@@ -239,7 +239,7 @@ fn text_width(text: &str, px: f32) -> f32 {
 
 fn layout<'a>(items: &'a [Item], s: f32) -> Layout<'a> {
     let h = (44.0 * s).round();
-    let text_px = 13.0 * s;
+    let text_px = 14.0 * s;
     let pad = 12.0 * s;
     let gap = 8.0 * s;
     let btn_h = (26.0 * s).round();
@@ -311,6 +311,11 @@ fn fill_rounded(pixmap: &mut Pixmap, rect: (f32, f32, f32, f32), radius: f32, co
     }
 }
 
+/// Light-on-dark text blended linearly in sRGB reads thin; boosting the
+/// coverage curve brightens the AA edge pixels back to perceptually-even
+/// weight (egui applies the same kind of tweak internally).
+const COVERAGE_GAMMA: f32 = 0.6;
+
 /// Source-over glyph coverage onto the PREMULTIPLIED pixmap (export.rs's
 /// version assumes an opaque background and ignores alpha).
 fn draw_text(pixmap: &mut Pixmap, x: f32, baseline: f32, text: &str, px: f32, color: (u8, u8, u8, u8)) {
@@ -319,6 +324,9 @@ fn draw_text(pixmap: &mut Pixmap, x: f32, baseline: f32, text: &str, px: f32, co
     let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
     let data = pixmap.data_mut();
 
+    // Whole-pixel glyph placement: fractional positions smear the AA and the
+    // text goes soft. Advances stay fractional so spacing remains correct.
+    let baseline = baseline.round();
     let mut pen_x = x;
     let mut prev: Option<ab_glyph::GlyphId> = None;
     for ch in text.chars() {
@@ -326,7 +334,7 @@ fn draw_text(pixmap: &mut Pixmap, x: f32, baseline: f32, text: &str, px: f32, co
         if let Some(p) = prev {
             pen_x += scaled.kern(p, id);
         }
-        let glyph = id.with_scale_and_position(px, ab_glyph::point(pen_x, baseline));
+        let glyph = id.with_scale_and_position(px, ab_glyph::point(pen_x.round(), baseline));
         if let Some(outlined) = f.outline_glyph(glyph) {
             let bounds = outlined.px_bounds();
             outlined.draw(|gx, gy, cov| {
@@ -336,7 +344,7 @@ fn draw_text(pixmap: &mut Pixmap, x: f32, baseline: f32, text: &str, px: f32, co
                     return;
                 }
                 let idx = ((dy * pw + dx) * 4) as usize;
-                let a = cov.clamp(0.0, 1.0) * (color.3 as f32 / 255.0);
+                let a = cov.clamp(0.0, 1.0).powf(COVERAGE_GAMMA) * (color.3 as f32 / 255.0);
                 let src = [color.0 as f32, color.1 as f32, color.2 as f32, 255.0];
                 for c in 0..4 {
                     let dst = data[idx + c] as f32;
@@ -352,7 +360,7 @@ fn draw_text(pixmap: &mut Pixmap, x: f32, baseline: f32, text: &str, px: f32, co
 fn render(items: &[Item], s: f32, hover: Option<u32>) -> (Pixmap, Vec<((f32, f32, f32, f32), u32)>) {
     let l = layout(items, s);
     let mut pixmap = Pixmap::new(l.w as u32, l.h as u32).expect("pill pixmap");
-    let text_px = 13.0 * s;
+    let text_px = 14.0 * s;
     let scaled = font().as_scaled(ab_glyph::PxScale::from(text_px));
     let (ascent, descent) = (scaled.ascent(), scaled.descent());
     let baseline_in = |r: (f32, f32, f32, f32)| r.1 + r.3 / 2.0 + (ascent + descent) / 2.0;
