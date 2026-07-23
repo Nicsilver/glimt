@@ -328,6 +328,67 @@ fn clamp_to_monitor(shared: &Shared, monitor: usize, p: (i32, i32)) -> (i32, i32
     (p.0.clamp(x, x + w), p.1.clamp(y, y + h))
 }
 
+/// Amber frame around a recorded region: four raw opaque strip windows just
+/// outside it, excluded from capture. Raw Win32 rather than egui viewports —
+/// the OS clamps a 2px-tall viewport window's height at creation (the old
+/// egui top strip came out ~39px tall), and raw windows land on exact
+/// physical px.
+pub struct RecordBorder {
+    hwnds: [isize; 4],
+}
+
+impl RecordBorder {
+    pub fn show(region: (i32, i32, u32, u32)) -> Result<RecordBorder> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SWP_SHOWWINDOW, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+        };
+        const T: i32 = BORDER;
+        let (x, y, w, h) = (region.0, region.1, region.2 as i32, region.3 as i32);
+        let rects = [
+            // Horizontal strips overhang by T on both sides to close the corners.
+            (x - T, y - T, w + 2 * T, T), // top
+            (x - T, y + h, w + 2 * T, T), // bottom
+            (x - T, y, T, h),             // left
+            (x + w, y, T, h),             // right
+        ];
+        let mut hwnds = [0isize; 4];
+        unsafe {
+            let hinst = GetModuleHandleW(None).context("GetModuleHandleW failed")?.into();
+            register_classes(hinst);
+            for (i, (rx, ry, rw, rh)) in rects.into_iter().enumerate() {
+                let hwnd = create(hinst, w!("GlimtPickerBorder"), false)?;
+                // The strips sit outside the recorded rect, but exclude them
+                // from capture anyway so px rounding can't leak amber in.
+                let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    rx,
+                    ry,
+                    rw,
+                    rh,
+                    SWP_SHOWWINDOW | SWP_NOACTIVATE,
+                );
+                hwnds[i] = hwnd.0 as isize;
+            }
+        }
+        Ok(RecordBorder { hwnds })
+    }
+}
+
+impl Drop for RecordBorder {
+    fn drop(&mut self) {
+        for hwnd in self.hwnds {
+            let hwnd = HWND(hwnd as *mut _);
+            if !hwnd.is_invalid() {
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                }
+            }
+        }
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Shared;
     let Some(shared) = (unsafe { ptr.as_ref() }) else {

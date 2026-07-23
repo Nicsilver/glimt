@@ -42,7 +42,8 @@ struct Recording {
     started: std::time::Instant,
     region: (i32, i32, u32, u32),
     monitor: usize,
-    border_affinity_set: bool,
+    // Kept alive for the recording's duration; windows die with the drop.
+    _border: Option<picker::RecordBorder>,
 }
 
 struct GlimtApp {
@@ -289,7 +290,6 @@ impl eframe::App for GlimtApp {
         }
         self.picker_pill();
         self.recording_pill(&ctx);
-        self.record_border(&ctx);
     }
 }
 
@@ -331,7 +331,7 @@ impl GlimtApp {
             started: std::time::Instant::now(),
             region,
             monitor,
-            border_affinity_set: false,
+            _border: picker::RecordBorder::show(region).ok(),
         });
         self.tray.set_recording(true);
     }
@@ -468,109 +468,6 @@ impl GlimtApp {
         }
         // Keep the timer ticking (and the recorder channel polled).
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
-    }
-
-    /// Amber frame around the region being recorded, built from four thin OPAQUE
-    /// strip windows sitting just outside the region. One transparent overlay
-    /// window is not an option: wgpu renders viewport transparency as an opaque
-    /// black fill on Windows (confirmed on this machine).
-    fn record_border(&mut self, ctx: &egui::Context) {
-        const T: f32 = 2.0; // thickness in points
-        let Some(rec) = &self.recording else {
-            return;
-        };
-        let scale = self.overlay.scale_of(rec.monitor);
-        let (rx, ry, rw, rh) = rec.region;
-        let (x, y) = (rx as f32 / scale, ry as f32 / scale);
-        let (w, h) = (rw as f32 / scale, rh as f32 / scale);
-        // Horizontal strips overhang by T on both sides to close the corners.
-        let strips = [
-            (egui::pos2(x - T, y - T), egui::vec2(w + 2.0 * T, T)), // top
-            (egui::pos2(x - T, y + h), egui::vec2(w + 2.0 * T, T)), // bottom
-            (egui::pos2(x - T, y), egui::vec2(T, h)),               // left
-            (egui::pos2(x + w, y), egui::vec2(T, h)),               // right
-        ];
-        for (i, (pos, size)) in strips.into_iter().enumerate() {
-            let builder = ViewportBuilder::default()
-                .with_title(format!("Glimt RecBorder{i}"))
-                .with_position(pos)
-                .with_inner_size(size)
-                .with_decorations(false)
-                .with_mouse_passthrough(true)
-                .with_always_on_top()
-                .with_taskbar(false)
-                .with_resizable(false);
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of(("glimt-recborder", i)),
-                builder,
-                |ui, _| {
-                    ui.painter().rect_filled(
-                        ui.max_rect(),
-                        0.0,
-                        egui::Color32::from_rgb(255, 197, 61),
-                    );
-                },
-            );
-        }
-        let rec = self.recording.as_mut().expect("recording checked above");
-        // The strips sit outside the recorded rect, but exclude them from capture
-        // anyway so point->pixel rounding at fractional DPI can't leak an amber
-        // line into the recording.
-        if !rec.border_affinity_set {
-            rec.border_affinity_set =
-                (0..4).all(|i| exclude_from_capture(&format!("Glimt RecBorder{i}")));
-        }
-    }
-}
-
-/// Find this process's top-level window with the given title.
-fn find_own_window(title: &str) -> Option<windows::Win32::Foundation::HWND> {
-    use windows::Win32::Foundation::{HWND, LPARAM};
-    use windows::Win32::System::Threading::GetCurrentProcessId;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId,
-    };
-
-    struct Data {
-        title: Vec<u16>,
-        found: Option<HWND>,
-    }
-    unsafe extern "system" fn cb(hwnd: HWND, data: LPARAM) -> windows::core::BOOL {
-        unsafe {
-            let data = &mut *(data.0 as *mut Data);
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid == GetCurrentProcessId() {
-                let mut buf = [0u16; 64];
-                let len = GetWindowTextW(hwnd, &mut buf) as usize;
-                if buf[..len] == data.title[..] {
-                    data.found = Some(hwnd);
-                    return false.into(); // found it; stop enumerating
-                }
-            }
-        }
-        true.into()
-    }
-    let mut data = Data {
-        title: title.encode_utf16().collect(),
-        found: None,
-    };
-    unsafe {
-        // Returns Err when the callback stops enumeration early; not a failure.
-        let _ = EnumWindows(Some(cb), LPARAM(&mut data as *mut _ as isize));
-    }
-    data.found
-}
-
-/// Exclude this process's window with the given title from screen capture, so
-/// the control pill never appears in the recording even when it overlaps it.
-fn exclude_from_capture(title: &str) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
-    };
-    match find_own_window(title) {
-        Some(hwnd) => unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok() },
-        None => false,
     }
 }
 
