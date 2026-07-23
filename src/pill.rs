@@ -21,8 +21,8 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, W
 use windows::Win32::Graphics::Dwm::{DWMWA_TRANSITIONS_FORCEDISABLED, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC,
-    ReleaseDC, SelectObject,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+    SelectObject,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -58,7 +58,11 @@ pub enum Item {
     Label(String),
     Dot,
     Sep,
-    Button { id: u32, text: String, selected: bool },
+    Button {
+        id: u32,
+        text: String,
+        selected: bool,
+    },
 }
 
 fn font() -> &'static FontRef<'static> {
@@ -107,7 +111,9 @@ impl Pill {
             }),
         });
         unsafe {
-            let hinst = GetModuleHandleW(None).context("GetModuleHandleW failed")?.into();
+            let hinst = GetModuleHandleW(None)
+                .context("GetModuleHandleW failed")?
+                .into();
             let class = WNDCLASSW {
                 lpfnWndProc: Some(wndproc),
                 hInstance: hinst,
@@ -208,7 +214,11 @@ enum Kind<'a> {
     Label(&'a str),
     Dot,
     Sep,
-    Button { id: u32, text: &'a str, selected: bool },
+    Button {
+        id: u32,
+        text: &'a str,
+        selected: bool,
+    },
 }
 
 struct Entry<'a> {
@@ -301,13 +311,24 @@ fn rounded_rect(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f32) {
     pb.close();
 }
 
-fn fill_rounded(pixmap: &mut Pixmap, rect: (f32, f32, f32, f32), radius: f32, color: (u8, u8, u8, u8)) {
+fn fill_rounded(
+    pixmap: &mut Pixmap,
+    rect: (f32, f32, f32, f32),
+    radius: f32,
+    color: (u8, u8, u8, u8),
+) {
     let mut pb = PathBuilder::new();
     rounded_rect(&mut pb, rect.0, rect.1, rect.2, rect.3, radius);
     if let Some(path) = pb.finish() {
         let mut paint = Paint::default();
         rgba(&mut paint, color);
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 }
 
@@ -318,7 +339,14 @@ const COVERAGE_GAMMA: f32 = 0.6;
 
 /// Source-over glyph coverage onto the PREMULTIPLIED pixmap (export.rs's
 /// version assumes an opaque background and ignores alpha).
-fn draw_text(pixmap: &mut Pixmap, x: f32, baseline: f32, text: &str, px: f32, color: (u8, u8, u8, u8)) {
+fn draw_text(
+    pixmap: &mut Pixmap,
+    x: f32,
+    baseline: f32,
+    text: &str,
+    px: f32,
+    color: (u8, u8, u8, u8),
+) {
     let f = font();
     let scaled = f.as_scaled(ab_glyph::PxScale::from(px));
     let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
@@ -357,7 +385,11 @@ fn draw_text(pixmap: &mut Pixmap, x: f32, baseline: f32, text: &str, px: f32, co
     }
 }
 
-fn render(items: &[Item], s: f32, hover: Option<u32>) -> (Pixmap, Vec<((f32, f32, f32, f32), u32)>) {
+fn render(
+    items: &[Item],
+    s: f32,
+    hover: Option<u32>,
+) -> (Pixmap, Vec<((f32, f32, f32, f32), u32)>) {
     let l = layout(items, s);
     let mut pixmap = Pixmap::new(l.w as u32, l.h as u32).expect("pill pixmap");
     let text_px = 14.0 * s;
@@ -385,7 +417,14 @@ fn render(items: &[Item], s: f32, hover: Option<u32>) -> (Pixmap, Vec<((f32, f32
     for e in &l.entries {
         match &e.kind {
             Kind::Label(t) => {
-                draw_text(&mut pixmap, e.rect.0, baseline_in(e.rect), t, text_px, LABEL);
+                draw_text(
+                    &mut pixmap,
+                    e.rect.0,
+                    baseline_in(e.rect),
+                    t,
+                    text_px,
+                    LABEL,
+                );
             }
             Kind::Dot => {
                 let mut pb = PathBuilder::new();
@@ -397,7 +436,13 @@ fn render(items: &[Item], s: f32, hover: Option<u32>) -> (Pixmap, Vec<((f32, f32
                 if let Some(path) = pb.finish() {
                     let mut paint = Paint::default();
                     rgba(&mut paint, DOT);
-                    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+                    pixmap.fill_path(
+                        &path,
+                        &paint,
+                        FillRule::Winding,
+                        Transform::identity(),
+                        None,
+                    );
                 }
             }
             Kind::Sep => {
@@ -562,8 +607,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_MOUSEACTIVATE if !shared.activatable => LRESULT(MA_NOACTIVATE as isize),
         WM_SETCURSOR => {
             let cursor = unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
                 use windows::Win32::Graphics::Gdi::ScreenToClient;
+                use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
                 let mut p = POINT::default();
                 let _ = GetCursorPos(&mut p);
                 let _ = ScreenToClient(hwnd, &mut p);

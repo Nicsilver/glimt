@@ -23,14 +23,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, SetFocus, VK_ESCAPE, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BeginDeferWindowPos, CreateWindowExW, DeferWindowPos, DefWindowProcW, DestroyWindow,
-    EndDeferWindowPos, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST, IDC_CROSS, LoadCursorW,
-    RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    SW_SHOW, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP, GetSystemMetrics, LWA_ALPHA,
+    BeginDeferWindowPos, CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyWindow,
+    EndDeferWindowPos, GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, IDC_CROSS,
+    LWA_ALPHA, LoadCursorW, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_RBUTTONDOWN, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::w;
 
@@ -100,7 +100,9 @@ impl Picker {
         });
 
         unsafe {
-            let hinst = GetModuleHandleW(None).context("GetModuleHandleW failed")?.into();
+            let hinst = GetModuleHandleW(None)
+                .context("GetModuleHandleW failed")?
+                .into();
             register_classes(hinst);
 
             for cell in &shared.dim {
@@ -121,16 +123,8 @@ impl Picker {
             SetWindowLongPtrW(input, GWLP_USERDATA, &*shared as *const Shared as isize);
 
             let (vx, vy, vw, vh) = virt;
-            SetWindowPos(
-                input,
-                Some(HWND_TOPMOST),
-                vx,
-                vy,
-                vw,
-                vh,
-                SWP_SHOWWINDOW,
-            )
-            .context("show input window")?;
+            SetWindowPos(input, Some(HWND_TOPMOST), vx, vy, vw, vh, SWP_SHOWWINDOW)
+                .context("show input window")?;
             relayout(&shared);
             let _ = ShowWindow(input, SW_SHOW);
             // Allowed here because the global hotkey press granted this process
@@ -278,10 +272,10 @@ fn relayout(shared: &Shared) {
     let (dim_rects, border_rects) = match hole {
         Some((x, y, w, h)) if w > 0 && h > 0 => (
             [
-                (vx, vy, vw, y - vy),                     // above
-                (vx, y + h, vw, vy + vh - (y + h)),       // below
-                (vx, y, x - vx, h),                       // left
-                (x + w, y, vx + vw - (x + w), h),         // right
+                (vx, vy, vw, y - vy),               // above
+                (vx, y + h, vw, vy + vh - (y + h)), // below
+                (vx, y, x - vx, h),                 // left
+                (x + w, y, vx + vw - (x + w), h),   // right
             ],
             [
                 // Horizontal strips overhang by BORDER to close the corners.
@@ -291,14 +285,21 @@ fn relayout(shared: &Shared) {
                 (x + w, y, BORDER, h),                            // right
             ],
         ),
-        _ => ([(vx, vy, vw, vh), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)], [(0, 0, 0, 0); 4]),
+        _ => (
+            [(vx, vy, vw, vh), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)],
+            [(0, 0, 0, 0); 4],
+        ),
     };
 
     unsafe {
         let Ok(mut hdwp) = BeginDeferWindowPos(8) else {
             return;
         };
-        let windows = shared.dim.iter().zip(dim_rects).chain(shared.border.iter().zip(border_rects));
+        let windows = shared
+            .dim
+            .iter()
+            .zip(dim_rects)
+            .chain(shared.border.iter().zip(border_rects));
         for (cell, (x, y, w, h)) in windows {
             let hwnd = HWND(cell.get() as *mut _);
             let vis = if w > 0 && h > 0 {
@@ -306,7 +307,16 @@ fn relayout(shared: &Shared) {
             } else {
                 SWP_HIDEWINDOW
             };
-            match DeferWindowPos(hdwp, hwnd, None, x, y, w.max(0), h.max(0), vis | SWP_NOZORDER | SWP_NOACTIVATE) {
+            match DeferWindowPos(
+                hdwp,
+                hwnd,
+                None,
+                x,
+                y,
+                w.max(0),
+                h.max(0),
+                vis | SWP_NOZORDER | SWP_NOACTIVATE,
+            ) {
                 Ok(next) => hdwp = next,
                 Err(_) => return,
             }
@@ -353,7 +363,9 @@ impl RecordBorder {
         ];
         let mut hwnds = [0isize; 4];
         unsafe {
-            let hinst = GetModuleHandleW(None).context("GetModuleHandleW failed")?.into();
+            let hinst = GetModuleHandleW(None)
+                .context("GetModuleHandleW failed")?
+                .into();
             register_classes(hinst);
             for (i, (rx, ry, rw, rh)) in rects.into_iter().enumerate() {
                 let hwnd = create(hinst, w!("GlimtPickerBorder"), false)?;
