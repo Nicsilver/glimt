@@ -89,7 +89,11 @@ fn main() {
         "Glimt",
         options,
         Box::new(move |cc| {
-            let _ = &cc;
+            // egui's browser-style Ctrl+/-/0 UI zoom changes pixels_per_point,
+            // which the overlay math treats as the monitor scale — one stray
+            // Ctrl+- makes every overlay window overflow its monitor (frozen
+            // image shows cropped + upscaled) for the tray process's lifetime.
+            cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
             Ok(Box::new(GlimtApp {
                 rx,
                 tray,
