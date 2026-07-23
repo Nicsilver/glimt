@@ -8,6 +8,7 @@ mod encode_mp4;
 mod export;
 mod hotkey;
 mod overlay;
+mod picker;
 mod record;
 mod single_instance;
 mod tray;
@@ -42,6 +43,7 @@ struct GlimtApp {
     _hotkey: hotkey::Hotkey,
     settings: config::Settings,
     overlay: overlay::Overlay,
+    picker: Option<picker::Picker>,
     recording: Option<Recording>,
     // Run a few frames at startup so the overlay windows get created and their
     // per-monitor scales measured before the first capture.
@@ -100,6 +102,7 @@ fn main() {
                 _hotkey: hk,
                 settings,
                 overlay: overlay::Overlay::new(),
+                picker: None,
                 recording: None,
                 warmup_frames: 0,
             }))
@@ -180,6 +183,23 @@ fn pump_events(tx: mpsc::Sender<AppMsg>, tray: &tray::Tray, hk: &hotkey::Hotkey)
 static REPAINT: std::sync::OnceLock<std::sync::Arc<std::sync::OnceLock<egui::Context>>> =
     std::sync::OnceLock::new();
 
+/// Wake the UI loop from outside it (picker wndproc, pump threads).
+pub fn request_repaint() {
+    if let Some(slot) = REPAINT.get()
+        && let Some(ctx) = slot.get()
+    {
+        ctx.request_repaint();
+    }
+}
+
+/// Block until DWM has composited pending window changes, so windows we just
+/// destroyed or hid are really gone from the screen before a capture starts.
+fn dwm_flush() {
+    unsafe {
+        let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+    }
+}
+
 impl eframe::App for GlimtApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(slot) = REPAINT.get() {
@@ -193,23 +213,37 @@ impl eframe::App for GlimtApp {
 
         self.poll_recorder();
 
+        if let Some(p) = &self.picker {
+            match p.take_action() {
+                Some(picker::Action::Cancel) => self.picker = None,
+                Some(picker::Action::Start) => self.start_picker_recording(),
+                None => {}
+            }
+        }
+
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMsg::Capture { video } => {
                     if let Some(rec) = &self.recording {
                         // PrtSc (and friends) during a recording finish it.
                         rec.handle.stop();
-                    } else if !self.overlay.active() {
-                        match capture::GdiCapturer.capture_all() {
-                            Ok(shots) => {
-                                let mode = if video {
-                                    overlay::Mode::Video
-                                } else {
-                                    overlay::Mode::Photo
-                                };
-                                self.overlay
-                                    .start(ctx, shots, mode, self.settings.video_format);
+                    } else if video {
+                        if self.picker.is_some() {
+                            self.picker = None; // Shift+PrtSc toggles the picker off
+                        } else if !self.overlay.active() {
+                            match picker::Picker::open() {
+                                Ok(p) => self.picker = Some(p),
+                                Err(e) => message_box(&format!("Record setup failed: {e:#}")),
                             }
+                        }
+                    } else if !self.overlay.active() {
+                        if self.picker.take().is_some() {
+                            // The dim strips are real windows: wait for DWM to
+                            // composite their removal or they'd be in the shot.
+                            dwm_flush();
+                        }
+                        match capture::GdiCapturer.capture_all() {
+                            Ok(shots) => self.overlay.start(ctx, shots),
                             Err(e) => message_box(&format!("Capture failed: {e:#}")),
                         }
                     }
@@ -241,6 +275,7 @@ impl eframe::App for GlimtApp {
         if let Some(outcome) = self.overlay.show_all(&ctx) {
             self.finish_overlay(&ctx, outcome);
         }
+        self.picker_pill(&ctx);
         self.recording_pill(&ctx);
         self.record_border(&ctx);
     }
@@ -248,29 +283,6 @@ impl eframe::App for GlimtApp {
 
 impl GlimtApp {
     fn finish_overlay(&mut self, ctx: &egui::Context, outcome: overlay::Outcome) {
-        if matches!(outcome, overlay::Outcome::Record) {
-            // Read the selection before close() drops the capture session.
-            let data = self.overlay.record_data();
-            let monitor = self.overlay.active_monitor();
-            self.overlay.close(ctx); // screen goes live before recording starts
-            let (Some((region, format)), Some(monitor)) = (data, monitor) else {
-                return;
-            };
-            if self.settings.video_format != format {
-                self.settings.video_format = format;
-                self.settings.save();
-            }
-            self.recording = Some(Recording {
-                handle: record::start(region, format),
-                started: std::time::Instant::now(),
-                region,
-                monitor,
-                affinity_set: false,
-                border_affinity_set: false,
-            });
-            self.tray.set_recording(true);
-            return;
-        }
         let export = || -> anyhow::Result<image::RgbaImage> {
             let (shot, sel, annotations) = self
                 .overlay
@@ -279,7 +291,7 @@ impl GlimtApp {
             export::render(shot, sel, annotations)
         };
         let result = match outcome {
-            overlay::Outcome::Cancel | overlay::Outcome::Record => Ok(()),
+            overlay::Outcome::Cancel => Ok(()),
             overlay::Outcome::Copy => export().and_then(|img| export::to_clipboard(&img)),
             overlay::Outcome::Save => export().map(|img| {
                 let _ = export::to_file(&img);
@@ -288,6 +300,120 @@ impl GlimtApp {
         self.overlay.close(ctx);
         if let Err(e) = result {
             message_box(&format!("Export failed: {e:#}"));
+        }
+    }
+
+    /// Tear down the picker and start recording its selected region.
+    fn start_picker_recording(&mut self) {
+        let Some((region, monitor)) = self.picker.as_ref().and_then(|p| p.placed()) else {
+            return;
+        };
+        self.picker = None;
+        // The dim/border windows must be off screen before the first frame is
+        // captured, and DestroyWindow only takes effect at the next composition.
+        dwm_flush();
+        let format = self.settings.video_format;
+        self.recording = Some(Recording {
+            handle: record::start(region, format),
+            started: std::time::Instant::now(),
+            region,
+            monitor,
+            affinity_set: false,
+            border_affinity_set: false,
+        });
+        self.tray.set_recording(true);
+    }
+
+    /// Pre-record control pill under the picked region: size, MP4/GIF, Rec, cancel.
+    fn picker_pill(&mut self, ctx: &egui::Context) {
+        const PILL_SIZE: egui::Vec2 = egui::vec2(280.0, 44.0);
+        let Some((region, monitor)) = self.picker.as_ref().and_then(|p| p.placed()) else {
+            return;
+        };
+        let scale = self.overlay.scale_of(monitor);
+        let (_, mon_y, _, mon_h) = self.overlay.monitor_rect(monitor);
+        let (rx, ry, rw, rh) = region;
+
+        // Physical px -> points; flip above the region if it would land off
+        // the monitor's bottom (same logic as the recording pill).
+        let pill_h_phys = (PILL_SIZE.y * scale) as i32;
+        let mut y_phys = ry + rh as i32 + 8;
+        if y_phys + pill_h_phys > mon_y + mon_h {
+            y_phys = ry - 8 - pill_h_phys;
+        }
+        let pos = egui::pos2(rx as f32 / scale, y_phys as f32 / scale);
+
+        let (mut start, mut cancel) = (false, false);
+        let settings = &mut self.settings;
+        let builder = ViewportBuilder::default()
+            .with_title("Glimt Record")
+            .with_position(pos)
+            .with_inner_size(PILL_SIZE)
+            .with_decorations(false)
+            .with_always_on_top()
+            .with_taskbar(false)
+            .with_resizable(false);
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("glimt-pickbar"),
+            builder,
+            |ui, _| {
+                ui.painter()
+                    .rect_filled(ui.max_rect(), 6.0, egui::Color32::from_rgb(27, 30, 40));
+                ui.horizontal_centered(|ui| {
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(format!("{rw}\u{00D7}{rh}"))
+                            .color(egui::Color32::GRAY)
+                            .size(12.0),
+                    );
+                    ui.separator();
+                    let formats = [
+                        (config::VideoFormat::Mp4, "MP4"),
+                        (config::VideoFormat::Gif, "GIF"),
+                    ];
+                    for (format, label) in formats {
+                        if ui
+                            .selectable_label(settings.video_format == format, label)
+                            .clicked()
+                        {
+                            settings.video_format = format;
+                            settings.save();
+                        }
+                    }
+                    ui.separator();
+                    // "●"/"✕" glyphs are tofu in egui's fonts; paint the red
+                    // dot and use plain text instead.
+                    let (dot, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    ui.painter().circle_filled(
+                        dot.center(),
+                        5.0,
+                        egui::Color32::from_rgb(229, 72, 77),
+                    );
+                    if ui.button("Rec").clicked() {
+                        start = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+                // The picker's input window normally holds focus, but after a
+                // click on the pill these land here instead.
+                ui.input(|i| {
+                    if i.key_pressed(egui::Key::Escape) {
+                        cancel = true;
+                    }
+                    if i.key_pressed(egui::Key::Enter) {
+                        start = true;
+                    }
+                });
+            },
+        );
+
+        if cancel {
+            self.picker = None;
+        } else if start {
+            self.start_picker_recording();
         }
     }
 

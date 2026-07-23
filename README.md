@@ -25,7 +25,7 @@ Drag to select, annotate if you want, then Ctrl+C puts the PNG on your clipboard
 - Pixel-precise selection: zoom loupe, size badge, resize handles, arrow-key nudge (Shift for 10 px)
 - Annotations: pen, line, arrow, rectangle and text in five colors, with undo
 - Ctrl+C copies to the clipboard, Ctrl+S saves to `Pictures\Glimt` with a timestamped name
-- Records a region to MP4 or GIF: Shift+PrtSc or the toolbar's Video switch, and the saved file lands on your clipboard ready to paste
+- Records a region to MP4 or GIF: Shift+PrtSc lightly dims the live screen while you frame the region, and the saved file lands on your clipboard ready to paste
 - Lives in the tray, optional start with Windows
 
 ## Install
@@ -39,13 +39,13 @@ To start Glimt with Windows, toggle it in the tray menu.
 | Key | Action |
 | --- | --- |
 | PrtSc | Freeze the screen and start selecting |
-| Shift+PrtSc | Same, but in video mode |
+| Shift+PrtSc | Pick a region to record (live screen, no freeze) |
 | Drag | Select an area (with zoom loupe) |
 | Arrow keys | Nudge the selection 1 px (Shift: 10 px) |
 | Ctrl+C | Copy the selection to the clipboard |
 | Ctrl+S | Save to `Pictures\Glimt` |
 | Ctrl+Z | Undo last annotation |
-| Enter | Start recording the selection (video mode) |
+| Enter | Start recording the picked region |
 | Esc | Cancel |
 
 While recording, a small pill next to the region shows the timer with Stop and Discard buttons; pressing PrtSc again also stops and saves.
