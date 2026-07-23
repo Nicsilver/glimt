@@ -70,10 +70,15 @@ fn font() -> &'static FontRef<'static> {
     FONT.get_or_init(|| FontRef::try_from_slice(FONT_BYTES).expect("embedded font is valid"))
 }
 
+/// x, y, w, h in window px.
+type RectF = (f32, f32, f32, f32);
+/// Button rects and their ids, for hit-testing.
+type HitRects = Vec<(RectF, u32)>;
+
 struct State {
     items: Vec<Item>,
     pos: (i32, i32),
-    hit: Vec<((f32, f32, f32, f32), u32)>, // button rects (x, y, w, h) + id
+    hit: HitRects,
     hover: Option<u32>,
     clicked: Option<u32>,
     shown: bool,
@@ -223,7 +228,7 @@ enum Kind<'a> {
 
 struct Entry<'a> {
     kind: Kind<'a>,
-    rect: (f32, f32, f32, f32), // x, y, w, h
+    rect: RectF,
 }
 
 struct Layout<'a> {
@@ -311,12 +316,7 @@ fn rounded_rect(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f32) {
     pb.close();
 }
 
-fn fill_rounded(
-    pixmap: &mut Pixmap,
-    rect: (f32, f32, f32, f32),
-    radius: f32,
-    color: (u8, u8, u8, u8),
-) {
+fn fill_rounded(pixmap: &mut Pixmap, rect: RectF, radius: f32, color: (u8, u8, u8, u8)) {
     let mut pb = PathBuilder::new();
     rounded_rect(&mut pb, rect.0, rect.1, rect.2, rect.3, radius);
     if let Some(path) = pb.finish() {
@@ -385,17 +385,13 @@ fn draw_text(
     }
 }
 
-fn render(
-    items: &[Item],
-    s: f32,
-    hover: Option<u32>,
-) -> (Pixmap, Vec<((f32, f32, f32, f32), u32)>) {
+fn render(items: &[Item], s: f32, hover: Option<u32>) -> (Pixmap, HitRects) {
     let l = layout(items, s);
     let mut pixmap = Pixmap::new(l.w as u32, l.h as u32).expect("pill pixmap");
     let text_px = 14.0 * s;
     let scaled = font().as_scaled(ab_glyph::PxScale::from(text_px));
     let (ascent, descent) = (scaled.ascent(), scaled.descent());
-    let baseline_in = |r: (f32, f32, f32, f32)| r.1 + r.3 / 2.0 + (ascent + descent) / 2.0;
+    let baseline_in = |r: RectF| r.1 + r.3 / 2.0 + (ascent + descent) / 2.0;
 
     fill_rounded(&mut pixmap, (0.0, 0.0, l.w, l.h), 8.0 * s, BG);
     // Hairline inset border for definition against busy backgrounds.
